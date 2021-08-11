@@ -68,6 +68,7 @@ lines from `my_file.txt` as follows::
 
 """
 
+import json
 import math
 import multiprocessing.dummy as mp  # using threads for now
 import os
@@ -1494,3 +1495,65 @@ def sine_inputs(
         yield (obs, act, obs, mask)
 
   return Inputs(train_stream=random_minibatches, eval_stream=random_minibatches)
+
+
+@gin.configurable(module='trax.data')
+def CreateGluonTSInputs(
+    dataset_path=gin.REQUIRED,
+    batch_size=gin.REQUIRED,
+    max_length=gin.REQUIRED):
+  """Prepares inputs from a dataset preprocessed by GluonTS."""
+
+  def make_dataset_stream(train):
+    if train:
+      full_dataset_path = os.path.join(dataset_path, 'train/data.json')
+    else:
+      full_dataset_path = os.path.join(dataset_path, 'test/data.json')
+    dataset_handle = tf.io.gfile.GFile(full_dataset_path, 'r')
+
+    dataset = []
+    masks = []
+    max_data_length = 0
+    for data in dataset_handle:
+      parsed_data = json.loads(data)['target']
+      np_data = np.array(parsed_data)
+      max_data_length = max(np_data.size, max_data_length)
+      dataset.append(np_data)
+      masks.append(np.ones_like(np_data))
+
+    for i in range(len(dataset)):
+      if dataset[i].size < max_data_length:
+        pad_size = max_data_length - dataset[i].size
+        dataset[i] = np.pad(dataset[i], (pad_size, 0))
+        masks[i] = np.pad(masks[i], (pad_size, 0))
+
+    dataset = np.stack(dataset)
+    masks = np.stack(masks)
+
+    def minibatch_stream(_):
+      number_of_series = dataset.shape[0]
+      series_length = dataset.shape[1]
+      while True:
+        if train:
+          np.random.shuffle(dataset)
+        for i in range(0, number_of_series, batch_size):
+          if number_of_series - i < batch_size:
+            continue
+
+          if train:
+            j_range = range(0, series_length, max_length)
+          else:
+            j_range = [series_length - max_length]
+          for j in j_range:
+            if series_length - j < max_length:
+              continue
+            obs = dataset[i:(i + batch_size), j:(j + max_length)]
+            mask = masks[i:(i + batch_size), j:(j + max_length)]
+            act = np.zeros_like(obs, dtype=np.int32)
+            yield (obs, act, obs, mask)
+
+    return minibatch_stream
+
+  return Inputs(
+    train_stream=make_dataset_stream(True),
+    eval_stream=make_dataset_stream(False))

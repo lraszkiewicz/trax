@@ -178,14 +178,25 @@ class SerializedModelEvaluation(TrainingStepCallback):
 
     metrics = {k: np.array(v) for (k, v) in metrics.items()}
 
-    def metric_name(context, horizon):
-      return f'pred_error/context_{context}/horizon_{horizon}'
+    def metric_name(name, context, horizon):
+      return f'pred_{name}/context_{context}/horizon_{horizon}'
 
-    return {
-        metric_name(context, horizon):
-            np.sum(errors) / (np.sum(errors != 0) + 1e-6)
-        for ((context, horizon), errors) in metrics.items()
-    }
+    ret_metrics = {}
+    for ((name, context, horizon), errors) in metrics.items():
+      if name == 'error':
+        value = np.sum(errors) / (np.sum(errors != 0) + 1e-6)
+      elif name == 'smape':
+        errors = 200.0 * errors / horizon
+        value = np.sum(errors) / (np.sum(errors != 0) + 1e-6)
+        errors = np.sum(errors, axis=1) / np.sum(errors != 0, axis=1)
+
+        ret_metrics[metric_name(f'{name}_min', context, horizon)] = np.min(errors)
+        ret_metrics[metric_name(f'{name}_max', context, horizon)] = np.max(errors)
+        ret_metrics[metric_name(f'{name}_var', context, horizon)] = np.var(errors)
+
+      ret_metrics[metric_name(name, context, horizon)] = value
+
+    return ret_metrics
 
   def _evaluate_batch(self, batch):
     """Performs evaluation on a single batch."""
@@ -193,7 +204,7 @@ class SerializedModelEvaluation(TrainingStepCallback):
     obs_repr = serialization_utils.Serialize(self._obs_serializer)(obs)
     act_repr = serialization_utils.Serialize(self._act_serializer)(act)
 
-    errors = {}
+    metrics = {}
     last_context = 0
     last_state = self._init_state
     last_start_id = 0
@@ -219,11 +230,22 @@ class SerializedModelEvaluation(TrainingStepCallback):
             max_length=self._obs_serializer.representation_length,
             accelerate=False,
         )
+        pred = self._obs_serializer.deserialize(pred_repr)
         horizon = timestep + 1
+
+        smape = self._calculate_smape(pred, obs[:, context + timestep])
+
+        for hor_len in self._horizon_lengths:
+          if horizon <= hor_len:
+            key = ('smape', context, hor_len)
+            if key not in metrics:
+              metrics[key] = 0
+            metrics[key] += smape * mask[:, context + timestep]
+
         if horizon in self._horizon_lengths:
-          pred = self._obs_serializer.deserialize(pred_repr)
           error = self._calculate_error(pred, obs[:, context + timestep])
-          errors[context, horizon] = error * mask[:, context + timestep]
+          metrics['error', context, horizon] = \
+            error * mask[:, context + timestep]
 
         start_id = pred_repr[:, -1:]
         consume_sequence(
@@ -231,10 +253,14 @@ class SerializedModelEvaluation(TrainingStepCallback):
         )
         start_id = act_repr[:, context + timestep, -1:]
 
-    return errors
+    return metrics
 
   def _calculate_error(self, prediction, ground_truth):
     return (prediction - ground_truth) ** 2
+
+  def _calculate_smape(self, prediction, ground_truth):
+    return np.abs(ground_truth - prediction) / (
+      np.abs(ground_truth) + np.abs(prediction) + 1e-6)
 
 
 def consume_sequence(model, start_id, sequence):

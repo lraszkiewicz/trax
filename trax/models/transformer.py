@@ -30,6 +30,10 @@ D_FF = 2048
 N_LAYERS = 6
 N_HEADS = 8
 MAX_SEQUENCE_LENGTH = 2048
+CONV_BEFORE_DROPOUT = False
+CONV_AFTER_DROPOUT = False
+CONV_RELU = False
+CONV_KERNEL_SIZE = 8
 DROPOUT_RATE = .1
 DROPOUT_SHARED_AXES = None
 FF_ACTIVATION_TYPE = tl.Relu
@@ -197,6 +201,10 @@ def TransformerLM(vocab_size,
                   n_layers=N_LAYERS,
                   n_heads=N_HEADS,
                   max_len=MAX_SEQUENCE_LENGTH,
+                  conv_before_dropout=CONV_BEFORE_DROPOUT,
+                  conv_after_dropout=CONV_AFTER_DROPOUT,
+                  conv_relu=CONV_RELU,
+                  conv_kernel_size=CONV_KERNEL_SIZE,
                   dropout=DROPOUT_RATE,
                   dropout_shared_axes=DROPOUT_SHARED_AXES,
                   mode=MODE,
@@ -257,7 +265,17 @@ def TransformerLM(vocab_size,
   return tl.Serial(
       tl.ShiftRight(mode=mode),
       tl.Embedding(vocab_size, d_model),
+
+      *([tl.CausalConv(d_model, kernel_width=conv_kernel_size)]
+         if conv_before_dropout else []),
+      *([tl.Relu()] if conv_before_dropout and conv_relu else []),
+
       _Dropout(),
+
+      *([tl.CausalConv(d_model, kernel_width=conv_kernel_size)]
+         if conv_after_dropout else []),
+      *([tl.Relu()] if conv_after_dropout and conv_relu else []),
+
       tl.PositionalEncoding(max_len=max_len, mode=mode),
       [_DecBlock() for _ in range(n_layers)],
       tl.LayerNorm(),
