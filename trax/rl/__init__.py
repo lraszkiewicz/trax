@@ -46,3 +46,6 @@ DQN = configure_rl(training.DQN)
 TimeSeriesModel = gin.external_configurable(
     serialization_utils.TimeSeriesModel, module='trax.rl'
 )
+TimeSeriesModelAux = gin.external_configurable(
+    serialization_utils.TimeSeriesModelAux, module='trax.rl'
+)

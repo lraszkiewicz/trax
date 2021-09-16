@@ -77,6 +77,7 @@ Transformer = model_configure(transformer.Transformer)
 TransformerDecoder = model_configure(transformer.TransformerDecoder)
 TransformerEncoder = model_configure(transformer.TransformerEncoder)
 TransformerLM = model_configure(transformer.TransformerLM)
+TransformerLMAux = model_configure(transformer.TransformerLMAux)
 Transformer2 = model_configure(
     transformer2.Transformer2)
 WideResnet = model_configure(resnet.WideResnet)

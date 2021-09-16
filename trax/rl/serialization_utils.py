@@ -90,6 +90,45 @@ def Deinterleave(x_size, y_size):
   return tl.Fn('Deinterleave', deinterleave, n_out=2)
 
 
+def Unflatten(precision):
+  """Layer that does the inverse of tl.Flatten."""
+  def unflatten(x):
+    (batch_size, _) = x.shape[:2]
+    shape_suffix = x.shape[2:]
+    ret = jnp.reshape(x, (batch_size, -1, precision) + shape_suffix)
+    print('Unflatten {} -> {}'.format(x.shape, ret.shape))
+    return ret
+  return tl.Fn('Unflatten', unflatten)
+
+
+def Repeat(n):
+  """Layer that repeats each element n times.
+  (batch_size, length) -> (batch_size, length * n)"""
+  def repeat(x):
+    ret = jnp.repeat(x, n, axis=1)
+    print('Repeat {} -> {}'.format(x.shape, ret.shape))
+    return ret
+  return tl.Fn('Repeat', repeat)
+
+
+def Stack():
+  """Layer that stacks two inputs."""
+  def stack(x, y):
+    ret = jnp.concatenate((x, y), axis=1)
+    print('Stack ({}, {}) -> {}'.format(x.shape, y.shape, ret.shape))
+    return ret
+  return tl.Fn('Stack', stack)
+
+
+def Unstack():
+  """Layer that does the inverse of serialization_utils.Stack."""
+  def unstack(x):
+    a, b = jnp.split(x, 2, axis=1)
+    print('Unstack {} -> ({}, {})'.format(x.shape, a.shape, b.shape))
+    return (a, b)
+  return tl.Fn('Unstack', unstack, n_out=2)
+
+
 def RepresentationMask(serializer):
   """Upsamples a mask to cover the serialized representation."""
   # Trax enforces the mask to be of the same size as the target. Get rid of the
@@ -240,6 +279,102 @@ def TimeSeriesModel(
   )
   seq_model = functools.partial(seq_model, vocab_size=vocab_size)
   return SerializedModel(seq_model, obs_srl, act_srl, significance_decay, mode)
+
+
+class SerializedModelAux(tl.Serial):
+  """SerializedModelAux"""
+
+  def __init__(
+      self,
+      seq_model,
+      observation_serializer,
+      aux_serializer,
+      significance_decay,
+      mode='train',
+  ):
+    """Initializes SerializedModelAux."""
+    assert mode in ('train', 'eval')
+    weigh_by_significance = [
+        # (mask,)
+        RepresentationMask(serializer=observation_serializer),
+        # (repr_mask)
+        SignificanceWeights(serializer=observation_serializer,
+                            decay=significance_decay),
+        # (mask, sig_weights)
+    ]
+    super().__init__(
+        # (obs, aux, obs, mask)
+        tl.Parallel(Serialize(serializer=observation_serializer),
+                    Serialize(serializer=aux_serializer),
+                    Serialize(serializer=observation_serializer)),
+        # (obs_repr, aux_repr, obs_repr, mask)
+        tl.Parallel(tl.Flatten(), tl.Flatten()),
+        tl.Parallel(None, Repeat(observation_serializer.representation_length)),
+        # (obs_repr_flat, aux_repr_rep, obs_repr, mask)
+        Stack(),
+        # (obs_aux_repr_stacked, obs_repr, mask)
+        seq_model(mode=mode),
+        # (obs_logits, obs_repr, mask)
+        Unflatten(observation_serializer.representation_length),
+        # (obs_logits, obs_repr, mask)
+        tl.Parallel(None, None, weigh_by_significance),
+        # (obs_logits, obs_repr, weights)
+    )
+
+    self._seq_model = seq_model
+    self._observation_serializer = observation_serializer
+    self._aux_serializer = aux_serializer
+
+  @property
+  def observation_serializer(self):
+    return self._observation_serializer
+
+  @property
+  def action_serializer(self):
+    return self._aux_serializer
+
+  def make_predict_model(self):
+    """Returns a predict-mode model of the same architecture."""
+    return self._seq_model(mode='predict')
+
+  @property
+  def seq_model_weights(self):
+    """Extracts the weights of the underlying sequence model."""
+    return self.weights[4]
+
+  @property
+  def seq_model_state(self):
+    """Extracts the state of the underlying sequence model."""
+    return self.state[4]
+
+
+def TimeSeriesModelAux(
+    seq_model,
+    low=0.0,
+    high=1.0,
+    precision=2,
+    vocab_size=64,
+    aux_vocab_size=7,
+    significance_decay=0.7,
+    mode='train',
+):
+  """Simplified constructor for SerializedModelAux,
+  for time series prediction with discrete auxiliary data."""
+  # Model scalar time series.
+  obs_srl = space_serializer.BoxSpaceSerializer(
+      space=gym.spaces.Box(shape=(), low=low, high=high),
+      vocab_size=vocab_size,
+      precision=precision,
+  )
+  # Then and vocab_size arguments don't do anything inside the serializer.
+  # Leaving them at 1, even though the space is actually bigger.
+  aux_srl = space_serializer.DiscreteSpaceSerializer(
+      space=gym.spaces.Discrete(n=aux_vocab_size), vocab_size=aux_vocab_size
+  )
+  seq_model = functools.partial(
+    seq_model, vocab_size=vocab_size, aux_vocab_size=aux_vocab_size)
+  return SerializedModelAux(
+    seq_model, obs_srl, aux_srl, significance_decay, mode)
 
 
 def RawPolicy(seq_model, n_controls, n_actions):

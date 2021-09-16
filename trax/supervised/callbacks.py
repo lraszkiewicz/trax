@@ -82,6 +82,7 @@ class SerializedModelEvaluation(TrainingStepCallback):
       n_steps=1,
       accelerate_model=True,
       normalize_context=False,
+      model_with_aux=False,
   ):
     """Initializes SerializedModelEvaluation.
 
@@ -140,11 +141,17 @@ class SerializedModelEvaluation(TrainingStepCallback):
     self._horizon_lengths = list(sorted(horizon_lengths))
     self._n_steps = n_steps
     self._normalize_context = normalize_context
+    self._model_with_aux = model_with_aux
 
     self._batch_size = eval_task.sample_batch[0].shape[0]
-    (_, self._init_state) = predict_model.init(
-        shapes.ShapeDtype((self._batch_size, 1), dtype=np.int32)
-    )
+    if self._model_with_aux:
+      (_, self._init_state) = predict_model.init(
+          shapes.ShapeDtype((2, self._batch_size, 1), dtype=np.int32),
+      )
+    else:
+      (_, self._init_state) = predict_model.init(
+          shapes.ShapeDtype((self._batch_size, 1), dtype=np.int32)
+      )
 
   @property
   def predict_model(self):

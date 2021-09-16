@@ -21,6 +21,7 @@ The "Transformer" name and network architecture were introduced in the paper
 """
 
 from trax import layers as tl
+from trax.rl import serialization_utils
 
 
 # Defaults used across Transformer variants.
@@ -276,6 +277,49 @@ def TransformerLM(vocab_size,
          if conv_after_dropout else []),
       *([tl.Relu()] if conv_after_dropout and conv_relu else []),
 
+      tl.PositionalEncoding(max_len=max_len, mode=mode),
+      [_DecBlock() for _ in range(n_layers)],
+      tl.LayerNorm(),
+      tl.Dense(vocab_size),
+  )
+
+
+def ElementSum():
+  """Layer that sums two inputs element-wise."""
+  def element_sum(x, y):
+    ret = x + y
+    print('ElementSum ({}, {}) -> {}'.format(x.shape, y.shape, ret.shape))
+    return ret
+  return tl.Fn('ElementSum', element_sum)
+
+
+def TransformerLMAux(vocab_size,
+                     aux_vocab_size,
+                     d_model=D_MODEL,
+                     d_ff=D_FF,
+                     n_layers=N_LAYERS,
+                     n_heads=N_HEADS,
+                     max_len=MAX_SEQUENCE_LENGTH,
+                     dropout=DROPOUT_RATE,
+                     dropout_shared_axes=DROPOUT_SHARED_AXES,
+                     mode=MODE,
+                     ff_activation=FF_ACTIVATION_TYPE):
+  """Returns a TransformerLMAux."""
+  def _Dropout():
+    return tl.Dropout(rate=dropout, shared_axes=dropout_shared_axes, mode=mode)
+
+  def _DecBlock():
+    return _DecoderBlock(d_model, d_ff, n_heads, dropout, dropout_shared_axes,
+                         mode, ff_activation)
+
+  return tl.Serial(
+      serialization_utils.Unstack(),
+      tl.Parallel(tl.ShiftRight(mode=mode), tl.ShiftRight(mode=mode)),
+      tl.Parallel(
+        tl.Embedding(vocab_size, d_model),
+        tl.Embedding(aux_vocab_size, d_model)),
+      ElementSum(),
+      _Dropout(),
       tl.PositionalEncoding(max_len=max_len, mode=mode),
       [_DecBlock() for _ in range(n_layers)],
       tl.LayerNorm(),
