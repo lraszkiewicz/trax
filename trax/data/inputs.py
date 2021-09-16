@@ -68,6 +68,7 @@ lines from `my_file.txt` as follows::
 
 """
 
+from datetime import datetime, timedelta
 import json
 import math
 import multiprocessing.dummy as mp  # using threads for now
@@ -1501,34 +1502,71 @@ def sine_inputs(
 def CreateGluonTSInputs(
     dataset_path=gin.REQUIRED,
     batch_size=gin.REQUIRED,
-    max_length=gin.REQUIRED):
+    max_length=gin.REQUIRED,
+    aux_data_type='none',
+    normalize_train=False):
   """Prepares inputs from a dataset preprocessed by GluonTS."""
 
   def make_dataset_stream(train):
+    metadata_path = os.path.join(dataset_path, 'metadata.json')
     if train:
       full_dataset_path = os.path.join(dataset_path, 'train/data.json')
     else:
       full_dataset_path = os.path.join(dataset_path, 'test/data.json')
     dataset_handle = tf.io.gfile.GFile(full_dataset_path, 'r')
 
+    with tf.io.gfile.GFile(metadata_path, 'r') as metadata_handle:
+      metadata = json.load(metadata_handle)
+
+    if aux_data_type in ['hour', 'weekday']:
+      assert metadata['freq'] in ['H']
+
     dataset = []
     masks = []
+    aux_data = []
     max_data_length = 0
     for data in dataset_handle:
-      parsed_data = json.loads(data)['target']
-      np_data = np.array(parsed_data)
-      max_data_length = max(np_data.size, max_data_length)
+      data_row = json.loads(data)
+      np_data = np.array(data_row['target'])
+      row_length = np_data.size
+      max_data_length = max(row_length, max_data_length)
+      if train and normalize_train:
+        mean = np.mean(np_data)
+        std = np.std(np_data, ddof=1)
+        np_data = np.nan_to_num((np_data - mean) / std)
       dataset.append(np_data)
       masks.append(np.ones_like(np_data))
+
+      if aux_data_type in ['hour', 'weekday']:
+        date = datetime.strptime(data_row['start'], '%Y-%m-%d %H:%M:%S')
+        if metadata['freq'] == 'H':
+          delta = timedelta(hours=1)
+
+      if aux_data_type == 'hour':
+        hours = []
+        for i in range(row_length):
+          hours.append(date.hour)
+          date += delta
+        aux_data.append(np.array(hours, dtype=np.int32))
+      elif aux_data_type == 'weekday':
+        weekdays = []
+        for i in range(row_length):
+          weekdays.append(date.weekday())
+          date += delta
+        aux_data.append(np.array(weekdays, dtype=np.int32))
+      else:
+        aux_data.append(np.zeros_like(np_data, dtype=np.int32))
 
     for i in range(len(dataset)):
       if dataset[i].size < max_data_length:
         pad_size = max_data_length - dataset[i].size
         dataset[i] = np.pad(dataset[i], (pad_size, 0))
         masks[i] = np.pad(masks[i], (pad_size, 0))
+        aux_data[i] = np.pad(aux_data[i], (pad_size, 0))
 
     dataset = np.stack(dataset)
     masks = np.stack(masks)
+    aux_data = np.stack(aux_data)
 
     def minibatch_stream(_):
       number_of_series = dataset.shape[0]
@@ -1549,8 +1587,8 @@ def CreateGluonTSInputs(
               continue
             obs = dataset[i:(i + batch_size), j:(j + max_length)]
             mask = masks[i:(i + batch_size), j:(j + max_length)]
-            act = np.zeros_like(obs, dtype=np.int32)
-            yield (obs, act, obs, mask)
+            aux = aux_data[i:(i + batch_size), j:(j + max_length)]
+            yield (obs, aux, obs, mask)
 
     return minibatch_stream
 

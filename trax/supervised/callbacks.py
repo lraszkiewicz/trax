@@ -81,6 +81,7 @@ class SerializedModelEvaluation(TrainingStepCallback):
       horizon_lengths=(1,),
       n_steps=1,
       accelerate_model=True,
+      normalize_context=False,
   ):
     """Initializes SerializedModelEvaluation.
 
@@ -138,6 +139,7 @@ class SerializedModelEvaluation(TrainingStepCallback):
     self._context_lengths = list(sorted(context_lengths))
     self._horizon_lengths = list(sorted(horizon_lengths))
     self._n_steps = n_steps
+    self._normalize_context = normalize_context
 
     self._batch_size = eval_task.sample_batch[0].shape[0]
     (_, self._init_state) = predict_model.init(
@@ -201,16 +203,29 @@ class SerializedModelEvaluation(TrainingStepCallback):
   def _evaluate_batch(self, batch):
     """Performs evaluation on a single batch."""
     (obs, act, _, mask) = batch
-    obs_repr = serialization_utils.Serialize(self._obs_serializer)(obs)
     act_repr = serialization_utils.Serialize(self._act_serializer)(act)
 
     metrics = {}
     last_context = 0
     last_state = self._init_state
     last_start_id = 0
+
+    if self._normalize_context:
+      assert len(self._context_lengths) == 1
+
     for context in self._context_lengths:
       self._predict_model.state = last_state
       start_id = last_start_id
+
+      if self._normalize_context:
+        obs_context = obs[:, last_context:context]
+        obs_means = obs_context.mean(axis=1)
+        obs_stds = obs_context.std(axis=1, ddof=1)
+        obs_norm = (obs - obs_means[:, np.newaxis]) / obs_stds[:, np.newaxis]
+        obs_norm = np.nan_to_num(obs_norm)
+        obs_repr = serialization_utils.Serialize(self._obs_serializer)(obs_norm)
+      else:
+        obs_repr = serialization_utils.Serialize(self._obs_serializer)(obs)
 
       if context > last_context:
         context_seq = serialization_utils.Interleave()((
@@ -231,6 +246,9 @@ class SerializedModelEvaluation(TrainingStepCallback):
             accelerate=False,
         )
         pred = self._obs_serializer.deserialize(pred_repr)
+        if self._normalize_context:
+          pred = pred * obs_stds
+          pred = pred + obs_means
         horizon = timestep + 1
 
         smape = self._calculate_smape(pred, obs[:, context + timestep])
